@@ -1,5 +1,5 @@
 import clsx from "clsx";
-import { useCallback, useContext, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { FiDownload, FiMic, FiMicOff, FiSend } from "react-icons/fi";
 import { MdRefresh } from "react-icons/md";
 import { AppContext } from "../context";
@@ -21,6 +21,7 @@ export default function Records() {
     const [response, setResponse] = useState('Assistant will respond here...');
     const [chatThreadId, setChatThreadId] = useState<string | null>(null);
     const [audioResponse, setAudioResponse] = useState<string | null>(null);
+    const messageHandlerRef = useRef<((event: MessageEvent) => void) | null>(null);
     const audioElementRef = useRef<HTMLAudioElement>(null);
 
     const startRecording = useCallback(async () => {
@@ -68,70 +69,67 @@ export default function Records() {
         }
     }, []);
 
-    const sendAudioToServer = useCallback(async () => {
-        if (!ws || !recordedAudio) return;
-
-        setIsProcessing(true);
-
-        try {
-
-            let audioBuffer = await recordedAudio.arrayBuffer()
-            let threadId = ''
-            // Set up message handler
-            const handleMessage = async (event: MessageEvent) => {
-                try {
+    useEffect(() => {
+        // Define the message handler inside useEffect to capture the latest state
+        messageHandlerRef.current = async (event: MessageEvent) => {
+            try {
                 const data = JSON.parse(event.data);
                 console.log('Received message: ', data);
+
                 if (data.event_type === 'transcript') {
                     setTranscript(data.text);
                 } else if (data.event_type === 'agent_response') {
                     let dataResponse = data.text;
-                    if (typeof data.text === "string"){
+                    if (typeof data.text === "string") {
                         dataResponse = JSON.parse(data.text);
                     }
                     setResponse(dataResponse.responseText);
                     setChatThreadId(dataResponse.chat_thread_id);
-                    threadId = dataResponse.chat_thread_id;
                     setIsProcessing(false);
                     setRecordedAudio(null);
-                    audioBuffer = new ArrayBuffer(0);
                 } else if (data.event_type === 'audio_response') {
                     setAudioResponse(data.audio_data);
                     setIsProcessing(false);
                 } else if (data.event_type === 'listening') {
-                    if (threadId)
-                        ws.send(JSON.stringify({event_type: 'existing_chat', chat_thread_id: chatThreadId}));
-                    // Convert Blob to ArrayBuffer and send
-                    ws.binaryType = 'arraybuffer';
-                    audioBuffer = await recordedAudio.arrayBuffer();
-                    ws.send(audioBuffer);
+                    if (ws && recordedAudio) {
+                        if (chatThreadId) {
+                            ws.send(JSON.stringify({ event_type: 'existing_chat', chat_thread_id: chatThreadId }));
+                        }
+                        ws.binaryType = 'arraybuffer';
+                        const audioBuffer = await recordedAudio.arrayBuffer();
+                        ws.send(audioBuffer);
+                    }
                 } else if (data.event_type === 'audio_recieved') {
-                    // Send stop listening signal
-                    ws.send(JSON.stringify({ event_type: 'stop_listening' }));
+                    if (ws) {
+                        ws.send(JSON.stringify({ event_type: 'stop_listening' }));
+                    }
                     setIsProcessing(false);
                 } else if (data.event_type === 'status') {
                     console.log('Status:', data.message);
                 }
-                } catch (error) {
+            } catch (error) {
                 console.error('Error parsing message:', error);
-                }
-            };
+            }
+        };
+    }, [ws, recordedAudio, chatThreadId]); // Re-create the handler when these dependencies change
 
-            ws.removeEventListener('message', handleMessage);
+    useEffect(() => {
+        const handler = (event: MessageEvent) => {
+            if (messageHandlerRef.current) {
+                messageHandlerRef.current(event);
+            }
+        };
 
-            ws.addEventListener('message', handleMessage);
-
-            ws.send(JSON.stringify({ event_type: 'start_listening' }));
-
-            // Only remove the listener when component unmounts or when cleaning up
-            return () => {
-                ws.removeEventListener('message', handleMessage);
-                setIsProcessing(false);
-            };
-        } catch (error) {
-            console.error('Error sending audio:', error);
-            setIsProcessing(false);
+        if (ws) {
+            ws.addEventListener('message', handler);
+            return () => ws.removeEventListener('message', handler);
         }
+    }, [ws]);
+
+    const sendAudioToServer = useCallback(async () => {
+        if (!ws || !recordedAudio) return;
+        setIsProcessing(true);
+        ws.send(JSON.stringify({ event_type: 'start_listening' }));
     }, [ws, recordedAudio]);
 
     const playAudioResponse = useCallback((audioBase64: string) => {
